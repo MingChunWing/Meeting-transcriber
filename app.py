@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Local FYP meeting transcriber web app (speaker diarization + gender + cantonese).
+"""Local FYP meeting transcriber web app (speaker diarization + cantonese).
 
 Pipeline:
   1. faster-whisper (large-v3, CUDA) ASR  -> zh/en text
-  2. pyannote speaker-diarization-3.1     -> speaker clusters (voiceprint, not pitch)
-  3. per-cluster mean F0 (WORLD)          -> the single highest-pitch cluster = female Supervisor
-  4. labels: Supervisor (F) / Member A..D (M)
-  5. optional cantonese colloquial pass   -> *_cantonese.txt
+  2. pyannote speaker-diarization-3.1     -> speaker clusters (voiceprint)
+  3. labels: generic 講者1, 講者2, ... ordered by first appearance time
+  4. optional cantonese colloquial pass   -> *_cantonese.txt
 
 Run:  python app.py   ->  http://127.0.0.1:5000
 Needs env var HF_TOKEN (read token, pyannote license accepted).
@@ -159,11 +158,9 @@ def torch_device():
     import torch
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def mean_f0(chunk, sr=16000):
-    x = np.ascontiguousarray(chunk, dtype=np.float64)
-    f0, _, _ = pyworld.wav2world(x, fs=sr)
-    f0 = f0[f0 > 0]
-    return float(np.mean(f0)) if len(f0) else None
+# (removed) mean-F0 gender detection; diarization clusters now get generic
+# 講者1, 講者2, ... labels ordered by first appearance time. pyworld import
+# kept above so older environments still import cleanly.
 
 def fmt_srt_time(s):
     h = int(s // 3600); m = int((s % 3600) // 60); sec = int(s % 60); ms = int((s - int(s)) * 1000)
@@ -215,8 +212,7 @@ def transcribe_file(src, job=None):
                 best_overlap = ov; best = spk
         return best or "SPEAKER_00"
 
-    # 3) assign speaker per segment + collect per-speaker audio for F0/gender
-    spk_chunks = {}
+    # 3) assign speaker per segment
     raw_lines = []
     for seg in segs:
         text = seg.text.strip()
@@ -224,32 +220,21 @@ def transcribe_file(src, job=None):
             continue
         spk = speaker_at((seg.start + seg.end) / 2)
         raw_lines.append({"start": seg.start, "end": seg.end, "spk": spk, "text": text})
-        a0, a1 = int(seg.start * sr), int(seg.end * sr)
-        chunk = audio[a0:a1] if a1 <= len(audio) else audio[max(0, a0):]
-        spk_chunks.setdefault(spk, []).append(chunk)
 
-    # 4) per-speaker mean F0 -> highest = female (Supervisor)
-    spk_f0 = {}
-    for spk, chunks in spk_chunks.items():
-        allc = np.concatenate(chunks) if chunks else np.zeros(sr, dtype=np.float32)
-        f = mean_f0(allc, sr)
-        spk_f0[spk] = f if f is not None else 0.0
+    # 4) order distinct speakers by first-appearance time -> 講者1, 講者2...
+    first_seen = {}
+    for ln in raw_lines:
+        if ln["spk"] not in first_seen:
+            first_seen[ln["spk"]] = ln["start"]
+    ordered = sorted(first_seen.items(), key=lambda kv: kv[1])
+    label_map = {spk: f"講者{i+1}" for i, (spk, _) in enumerate(ordered)}
     set_progress(job, "label", 85)
-    log(f"per-speaker F0: {spk_f0}", step="label", pct=85)
-    # rank speakers by F0 desc; top-1 female, rest male; label A..D
-    ordered = sorted(spk_f0.items(), key=lambda kv: kv[1], reverse=True)
-    female_spk = ordered[0][0] if ordered else None
-    male_order = [s for s, _ in ordered if s != female_spk]
-    label_map = {female_spk: "Supervisor (F)"}
-    for i, s in enumerate(male_order[:4]):
-        label_map[s] = f"Member {chr(65+i)} (M)"
-    for s in male_order[4:]:
-        label_map[s] = "Member (M)"
+    log(f"speaker order: {ordered}", step="label", pct=85)
 
     # 5) build final lines
     lines = []
     for ln in raw_lines:
-        tag = label_map.get(ln["spk"], "Member (M)")
+        tag = label_map.get(ln["spk"], "講者")
         lines.append({"start": ln["start"], "end": ln["end"], "tag": tag, "text": ln["text"]})
 
     # 6) write txt/srt/vtt + cantonese
@@ -387,7 +372,7 @@ INDEX = r"""<!doctype html>
     <body>
     <div class="wrap">
     <h1>FYP Meeting Transcriber</h1>
-    <p class="sub">拖放錄音 → 聲紋分辨講者 → 標 <strong>Supervisor (F)</strong> / <strong>Member A–D (M)</strong> → 中/英轉寫 → 粵語口語字版</p>
+    <p class="sub">拖放錄音 → 聲紋分辨講者 → 標 講者1/2/… → 中/英轉寫 → 粵語口語字版</p>
     <div class="moderow">
       <span>模式</span>
       <span class="seg" role="radiogroup" aria-label="筆記模式">
@@ -443,8 +428,8 @@ INDEX = r"""<!doctype html>
           </svg>粵語 .txt</a>
       </div>
       <div id="transcript" tabindex="0"></div>
-      <p class="hint">聲紋分辨：最高音 cluster 自動標 <strong>Supervisor</strong>（唯一女聲），其餘標 Member A–D。
-        4 位男組員間以聲紋區分，如錯配可手動改 output。</p>
+      <p class="hint">聲紋分辨：按出場順序自動標 <strong>講者1、講者2…</strong>。
+        不同聲紋分開標號，如錯配可手動改 output。</p>
     </div>
     </div>
     <script>
@@ -562,12 +547,10 @@ def transcribe():
         out = []
         for line in open(path, encoding="utf-8"):
             line = line.rstrip("\n")
-            if line.startswith("Supervisor (F):"):
-                body = line[len("Supervisor (F):"):].strip()
-                out.append(f'<span class="f">Supervisor (F):</span> {body}')
-            elif line.startswith("Member") and ":" in line:
+            if line.startswith("講者") and ":" in line:
                 pre, _, body = line.partition(":")
-                out.append(f'<span class="m">{pre}:</span> {body.strip()}')
+                cls = "f" if pre.strip() == "講者1" else "m"
+                out.append(f'<span class="{cls}">{pre}:</span> {body.strip()}')
             else:
                 out.append(line)
         return "\n".join(out)
