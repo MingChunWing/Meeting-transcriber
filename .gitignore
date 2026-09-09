@@ -1,0 +1,13 @@
+# secrets — never commit
+hf_token.txt
+
+# python caches / outputs
+__pycache__/
+*.pyc
+outputs/
+pyannote_cache/
+*.tmp.wav
+*.recheck.wav
+
+# install logs
+install_*.log
