@@ -1,0 +1,28 @@
+# Pinned, tested versions for this machine (Win11, RTX 2080 Ti, Python 3.11)
+# Install order matters: torch CUDA first, then torchaudio matching, then pyannote 3.3.2
+
+# --- torch (must be CUDA build; CPU build breaks pyannote cuDNN) ---
+# pip install torch --index-url https://download.pytorch.org/whl/cu124
+# pip install torchaudio --index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchaudio==2.6.0+cu124
+
+# --- ASR ---
+faster-whisper
+# whisper not required (using faster-whisper)
+
+# --- speaker diarization (pin 3.3.2: compatible with torch 2.6 + old hf_hub API) ---
+pyannote.audio==3.3.2
+
+# --- HF hub (pin 0.25.2: still supports use_auth_token kwarg used internally by pyannote 3.3.2) ---
+huggingface_hub==0.25.2
+
+# --- audio / pitch ---
+pyworld
+soundfile
+
+# --- web ---
+flask
+
+# --- OCR helper (optional, for reading screenshots) ---
+# pytesseract  (also needs Tesseract-OCR installed via winget)
